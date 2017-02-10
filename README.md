@@ -1,9 +1,9 @@
 # VERY IMPORTANT NOTES:
 
-- This bot has not yet been tested with Questrade. *Use at your own risk.*
+- This bot has not yet been tested with Questrade. **Use at your own risk.**
 - This bot will only trade USD denominated non-halted securities priced greater than $1 with a market cap over 1B and average daily volume over 250k.
-- As Questrade does not support selling or buying on close, this bot *MUST* remain active until the end of the trading day to properly close out positions.
-- As a consequence of the above, this bot will close out *ALL* positions on your account within 15 minutes of the end of the trading day.
+- As Questrade does not support selling or buying on close, this bot **MUST** remain active until the end of the trading day to properly close out positions.
+- As a consequence of the above, this bot will close out **ALL** positions on your account within 15 minutes of the end of the trading day.
 - None of the information contained here constitutes an offer (or solicitation of an offer) to buy or sell any currency, product or financial instrument, to make any investment, or to participate in any particular trading strategy.
 
 # TODO
@@ -12,7 +12,7 @@
 - Memoize Questrade position IDs
 - Break out some of the repeated code into functions
 
-*Feel free to contribute!*
+**Feel free to contribute!**
 
 # Forked from Trump2Cash
 
