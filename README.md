@@ -1,4 +1,20 @@
-# Trump2Cash
+# VERY IMPORTANT NOTES:
+
+- This bot has not yet been tested with Questrade. *Use at your own risk.*
+- This bot will only trade USD denominated non-halted securities priced greater than $1 with a market cap over 1B and average daily volume over 250k.
+- As Questrade does not support selling or buying on close, this bot *MUST* remain active until the end of the trading day to properly close out positions.
+- As a consequence of the above, this bot will close out *ALL* positions on your account within 15 minutes of the end of the trading day.
+- None of the information contained here constitutes an offer (or solicitation of an offer) to buy or sell any currency, product or financial instrument, to make any investment, or to participate in any particular trading strategy.
+
+# TODO
+
+- Ditch Google Cloud, so this'll run anywhere (sorry Google)
+- Memoize Questrade position IDs
+- Break out some of the repeated code into functions
+
+*Feel free to contribute!*
+
+# Forked from Trump2Cash
 
 This bot watches [Donald Trump's tweets](https://twitter.com/realDonaldTrump)
 and waits for him to mention any publicly traded companies. When he does, it
@@ -17,7 +33,7 @@ notified whenever Trump tweets. The entity detection and sentiment analysis is
 done using Google's
 [Cloud Natural Language API](https://cloud.google.com/natural-language/) and the
 [Wikidata Query Service](https://query.wikidata.org/) provides the company data.
-The [TradeKing API](https://developers.tradeking.com/) does the stock trading.
+The [Questrade API](http://www.questrade.com/api) does the stock trading.
 
 The [`main`](main.py) module defines a callback where incoming tweets are
 handled and starts streaming Trump's feed:
@@ -92,27 +108,21 @@ export GOOGLE_APPLICATION_CREDENTIALS="/path/to/credentials-file.json"
 You also need to [enable the Cloud Natural Language API](https://cloud.google.com/natural-language/docs/getting-started#set_up_your_project)
 for your Google Cloud Platform project.
 
-#### TradeKing
+#### Questrade
 
-Log in to your [TradeKing](https://www.tradeking.com/) account and
-[create a new application](https://developers.tradeking.com/applications/CreateApplication).
-Behind the *Details* button for
-[your application](https://developers.tradeking.com/Applications) you'll find
-the *Consumer Key*, *Consumer Secret*, *OAuth (Access) Token*, and *Oauth (Access)
-Token Secret*. Export them all to environment variables:
+Log in to your [Questrade](https://www.questrade.com/) account and
+[enable the API + add an application](http://www.questrade.com/api/documentation/getting-started).
+Then, fill in the QUESTRADE constants found [here](http://www.questrade.com/api/documentation/authorization) to environment variables:
 
 ```shell
-export TRADEKING_CONSUMER_KEY="<YOUR_CONSUMER_KEY>"
-export TRADEKING_CONSUMER_SECRET="<YOUR_CONSUMER_SECRET>"
-export TRADEKING_ACCESS_TOKEN="<YOUR_ACCESS_TOKEN>"
-export TRADEKING_ACCESS_TOKEN_SECRET="<YOUR_ACCESS_TOKEN_SECRET>"
+export QUESTRADE_REFRESH_TOKEN="<YOUR_REFRESH_TOKEN>"
 ```
 
-Also export your TradeKing account number, which you'll find under
-*[My Accounts](https://investor.tradeking.com/Modules/Dashboard/dashboard.php)*:
+Also export your Questrade account number, which you'll find under
+*[My Accounts](https://my.questrade.com/)*:
 
 ```shell
-export TRADEKING_ACCOUNT_NUMBER="<YOUR_ACCOUNT_NUMBER>"
+export QUESTRADE_ACCOUNT_NUMBER="<YOUR_ACCOUNT_NUMBER>"
 ```
 
 ### 3. Install dependencies

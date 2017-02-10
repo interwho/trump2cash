@@ -2,48 +2,34 @@
 
 from datetime import datetime
 from datetime import timedelta
+from dateutil import parser
 from simplejson import loads
-from oauth2 import Consumer
 from oauth2 import Client
-from oauth2 import Token
 from os import getenv
 from os import path
 from pytz import timezone
 from pytz import utc
-from lxml.etree import Element
-from lxml.etree import SubElement
-from lxml.etree import tostring
+import json
+import __builtin__
 
 from logs import Logs
 
-# Read the authentication keys for TradeKing from environment variables.
-TRADEKING_CONSUMER_KEY = getenv("TRADEKING_CONSUMER_KEY")
-TRADEKING_CONSUMER_SECRET = getenv("TRADEKING_CONSUMER_SECRET")
-TRADEKING_ACCESS_TOKEN = getenv("TRADEKING_ACCESS_TOKEN")
-TRADEKING_ACCESS_TOKEN_SECRET = getenv("TRADEKING_ACCESS_TOKEN_SECRET")
+# Base URL for retrieving oAuth tokens.
+QUESTRADE_AUTH_API_URL = "https://login.questrade.com/oauth2/token?grant_type=refresh_token&refresh_token=%s"
 
-# Read the TradeKing account number from the environment variable.
-TRADEKING_ACCOUNT_NUMBER = getenv("TRADEKING_ACCOUNT_NUMBER")
+# Read the Questrade account number from the environment variable.
+QUESTRADE_ACCOUNT_NUMBER = getenv("QUESTRADE_ACCOUNT_NUMBER")
 
 # Only allow actual trades when the environment variable confirms it.
 USE_REAL_MONEY = getenv("USE_REAL_MONEY") == "YES"
 
-# The base URL for API requests to TradeKing.
-TRADEKING_API_URL = "https://api.tradeking.com/v1/%s.json"
-
-# The XML namespace for FIXML requests.
-FIXML_NAMESPACE = "http://www.fixprotocol.org/FIXML-5-0-SP2"
-
-# The HTTP headers for FIXML requests.
-FIXML_HEADERS = {"Content-Type": "text/xml"}
-
 # The amount of cash in dollars to hold from being spent.
 CASH_HOLD = 1000
 
-# Blacklsited stock ticker symbols, e.g. to avoid insider trading.
-TICKER_BLACKLIST = ["GOOG", "GOOGL"]
+# Blacklisted stock ticker symbols, e.g. to avoid insider trading.
+TICKER_BLACKLIST = []
 
-# We're using NYSE and NASDAQ, which are both in the easters timezone.
+# We're using NYSE and NASDAQ, which are both in the eastern timezone.
 MARKET_TIMEZONE = timezone("US/Eastern")
 
 # TODO: Use a comprehensive list.
@@ -60,6 +46,51 @@ class Trading:
 
     def __init__(self, logs_to_cloud):
         self.logs = Logs(name="trading", to_cloud=logs_to_cloud)
+
+        # Get initial API keys from Questrade
+        url = QUESTRADE_AUTH_API_URL % __builtin__.QUESTRADE_REFRESH_TOKEN
+        method = "GET"
+        body = ""
+        headers = None
+        client = Client(None, None)
+
+        self.logs.debug("Questrade request: %s %s %s %s" % (url, method, body, headers))
+        response, content = client.request(url, method=method, body=body, headers=headers)
+        self.logs.debug("Questrade response: %s %s" % (response, content))
+
+        try:
+            response = loads(content)
+            self.access_token = response['access_token']
+            self.api_server = response['api_server']
+            self.expires_in = datetime.now() + datetime.timedelta(0, response['expires_in'])
+            __builtin__.QUESTRADE_REFRESH_TOKEN = response['refresh_token']
+            self.token_type = response['token_type']
+
+        except ValueError:
+            self.logs.error("Failed to retrieve initial API tokens: %s" % content)
+
+    def refresh_tokens(self):
+        """Refreshes Questrade's access tokens. Must be run before expires_in."""
+        url = QUESTRADE_AUTH_API_URL % __builtin__.QUESTRADE_REFRESH_TOKEN
+        method = "GET"
+        body = ""
+        headers = None
+        client = Client(None, None)
+
+        self.logs.debug("Questrade request: %s %s %s %s" % (url, method, body, headers))
+        response, content = client.request(url, method=method, body=body, headers=headers)
+        self.logs.debug("Questrade response: %s %s" % (response, content))
+
+        try:
+            response = loads(content)
+            self.access_token = response['access_token']
+            self.api_server = response['api_server']
+            self.expires_in = datetime.now() + datetime.timedelta(0, response['expires_in'])
+            __builtin__.QUESTRADE_REFRESH_TOKEN = response['refresh_token']
+            self.token_type = response['token_type']
+
+        except ValueError:
+            self.logs.error("Failed to retrieve new API tokens: %s" % content)
 
     def make_trades(self, companies):
         """Executes trades for the specified companies based on sentiment."""
@@ -171,24 +202,36 @@ class Trading:
     def get_market_status(self):
         """Finds out whether the markets are open right now."""
 
-        clock_url = TRADEKING_API_URL % "market/clock"
+        clock_url = self.api_server % "v1/time"
         response = self.make_request(url=clock_url)
 
-        if not response or "response" not in response:
+        if not response or "time" not in response:
             self.logs.error("Missing clock response: %s" % response)
             return None
 
-        clock_response = response["response"]
-        if ("status" not in clock_response or
-            "current" not in clock_response["status"]):
-            self.logs.error("Malformed clock response: %s" % clock_response)
-            return None
+        clock_response = response["time"]
+        timestamp = parser.parse(clock_response)
 
-        current = clock_response["status"]["current"]
+        if not self.is_trading_day(timestamp):
+            return "closed"
 
-        if current not in ["pre", "open", "after", "close"]:
-            self.logs.error("Unknown market status: %s" % current)
-            return None
+        # Calculate the market hours for the given day. These are the same for NYSE
+        # and NASDAQ and include Questrade's extended hours. (http://help.questrade.com/how-to/frequently-asked-questions-
+        # (faqs)/self-directed-trading/learning-trading-basics/when-are-the-stock-markets-open-and-what-are-pre--and-post-market-hours-)
+        pre_time = timestamp.replace(hour=7, minute=30)
+        open_time = timestamp.replace(hour=9, minute=30)
+        close_time = timestamp.replace(hour=16)
+        after_time = timestamp.replace(hour=17, minute=30)
+
+        # Return the market status for each bucket.
+        if timestamp >= pre_time and timestamp < open_time:
+            current = "pre"
+        elif timestamp >= open_time and timestamp < close_time:
+            current = "open"
+        elif timestamp >= close_time and timestamp < after_time:
+            current = "after"
+        else:
+            current = "closed"
 
         self.logs.debug("Current market status: %s" % current)
         return current
@@ -365,19 +408,17 @@ class Trading:
         return MARKET_TIMEZONE.localize(market_time)
 
     def make_request(self, url, method="GET", body="", headers=None):
-        """Makes a request to the TradeKing API."""
+        """Makes a request to the Questrade API."""
 
-        consumer = Consumer(key=TRADEKING_CONSUMER_KEY,
-                            secret=TRADEKING_CONSUMER_SECRET)
-        token = Token(key=TRADEKING_ACCESS_TOKEN,
-                      secret=TRADEKING_ACCESS_TOKEN_SECRET)
-        client = Client(consumer, token)
+        client = Client(None, None)
+        if headers is None:
+            headers = {'Authorization': ("%s %s" % (self.token_type, self.access_token))}
 
-        self.logs.debug("TradeKing request: %s %s %s %s" %
+        self.logs.debug("Questrade request: %s %s %s %s" %
                         (url, method, body, headers))
         response, content = client.request(url, method=method, body=body,
                                            headers=headers)
-        self.logs.debug("TradeKing response: %s %s" % (response, content))
+        self.logs.debug("Questrade response: %s %s" % (response, content))
 
         try:
             return loads(content)
@@ -385,154 +426,138 @@ class Trading:
             self.logs.error("Failed to decode JSON response: %s" % content)
             return None
 
-    def fixml_buy_now(self, ticker, quantity):
-        """Generates the FIXML for a buy order at market price."""
-
-        fixml = Element("FIXML")
-        fixml.set("xmlns", FIXML_NAMESPACE)
-        order = SubElement(fixml, "Order")
-        order.set("TmInForce", "0")  # Day order
-        order.set("Typ", "1")  # Market price
-        order.set("Side", "1")  # Buy
-        order.set("Acct", TRADEKING_ACCOUNT_NUMBER)
-        instrmt = SubElement(order, "Instrmt")
-        instrmt.set("SecTyp", "CS")  # Common stock
-        instrmt.set("Sym", ticker)
-        ord_qty = SubElement(order, "OrdQty")
-        ord_qty.set("Qty", str(quantity))
-
-        return tostring(fixml)
-
-    def fixml_sell_eod(self, ticker, quantity):
-        """Generates the FIXML for a sell order at market price on close."""
-
-        fixml = Element("FIXML")
-        fixml.set("xmlns", FIXML_NAMESPACE)
-        order = SubElement(fixml, "Order")
-        order.set("TmInForce", "7")  # Market on close
-        order.set("Typ", "1")  # Market price
-        order.set("Side", "2")  # Sell
-        order.set("Acct", TRADEKING_ACCOUNT_NUMBER)
-        instrmt = SubElement(order, "Instrmt")
-        instrmt.set("SecTyp", "CS")  # Common stock
-        instrmt.set("Sym", ticker)
-        ord_qty = SubElement(order, "OrdQty")
-        ord_qty.set("Qty", str(quantity))
-
-        return tostring(fixml)
-
-    def fixml_short_now(self, ticker, quantity):
-        """Generates the FIXML for a sell short order at market price."""
-
-        fixml = Element("FIXML")
-        fixml.set("xmlns", FIXML_NAMESPACE)
-        order = SubElement(fixml, "Order")
-        order.set("TmInForce", "0")  # Day order
-        order.set("Typ", "1")  # Market price
-        order.set("Side", "5")  # Sell short
-        order.set("Acct", TRADEKING_ACCOUNT_NUMBER)
-        instrmt = SubElement(order, "Instrmt")
-        instrmt.set("SecTyp", "CS")  # Common stock
-        instrmt.set("Sym", ticker)
-        ord_qty = SubElement(order, "OrdQty")
-        ord_qty.set("Qty", str(quantity))
-
-        return tostring(fixml)
-
-    def fixml_cover_eod(self, ticker, quantity):
-        """Generates the FIXML for a sell to cover order at market close."""
-
-        fixml = Element("FIXML")
-        fixml.set("xmlns", FIXML_NAMESPACE)
-        order = SubElement(fixml, "Order")
-        order.set("TmInForce", "7")  # Market on close
-        order.set("Typ", "1")  # Market price
-        order.set("Side", "1")  # Buy
-        order.set("AcctTyp", "5")  # Cover
-        order.set("Acct", TRADEKING_ACCOUNT_NUMBER)
-        instrmt = SubElement(order, "Instrmt")
-        instrmt.set("SecTyp", "CS")  # Common stock
-        instrmt.set("Sym", ticker)
-        ord_qty = SubElement(order, "OrdQty")
-        ord_qty.set("Qty", str(quantity))
-
-        return tostring(fixml)
-
     def get_balance(self):
-        """Finds the cash balance in dollars available to spend."""
+        """Finds the cash balance in US dollars available to spend."""
 
-        balances_url = TRADEKING_API_URL % (
-            "accounts/%s" % TRADEKING_ACCOUNT_NUMBER)
+        balances_url = self.api_server % ("v1/accounts/%s/balances" % QUESTRADE_ACCOUNT_NUMBER)
         response = self.make_request(url=balances_url)
 
-        if not response or "response" not in response:
+        if not response or "perCurrencyBalances" not in response:
             self.logs.error("Missing balances response: %s" % response)
             return 0.0
 
-        balances = response["response"]
-        if ("accountbalance" not in balances or
-            "money" not in balances["accountbalance"] or
-            "cash" not in balances["accountbalance"]["money"] or
-            "uncleareddeposits" not in balances["accountbalance"]["money"]):
+        balances = response["perCurrencyBalances"]
+        for i in balances:
+            if i['currency'] == "USD":
+                balances = i
+                break
+
+        if "cash" not in balances:
             self.logs.error("Malformed balance response: %s" % balances)
             return 0.0
 
-        money = balances["accountbalance"]["money"]
+        money = balances["cash"]
         try:
-            cash = float(money["cash"])
-            uncleareddeposits = float(money["uncleareddeposits"])
-            return cash - uncleareddeposits
+            cash = float(money)
+            return cash
         except ValueError:
             self.logs.error("Malformed number in response: %s" % money)
             return 0.0
 
-    def get_last_price(self, ticker):
-        """Finds the last trade price for the specified stock."""
+    def get_ticker_symbol_id(self, ticker):
+        """Finds the Questrade symbol_id for the specified ticker"""
 
-        quotes_url = TRADEKING_API_URL % "market/ext/quotes"
-        quotes_url += "?symbols=%s" % ticker
-        quotes_url += "&fids=last,date,symbol,exch_desc,name"
+        symbols_url = self.api_server % "v1/symbols/search"
+        symbols_url += "?prefix=%s" % ticker
 
-        response = self.make_request(url=quotes_url)
+        response = self.make_request(url=symbols_url)
 
-        if not response or "response" not in response:
+        if not response or "symbols" not in response:
             self.logs.error("Missing quotes response for %s: %s" %
                             (ticker, response))
             return None
 
-        quotes = response["response"]
-        if (not quotes or "quotes" not in quotes or
-            "quote" not in quotes["quotes"]):
-            self.logs.error("Malformed quotes response for %s: %s" %
-                            (ticker, quotes_response))
+        symbols = response["symbols"]
+        symbol_id = None
+        for i in symbols:
+            if ((i['currency'] == "USD") and
+                    (i['symbol'] == ticker) and
+                    (i['securityType'] == "Stock")):
+                symbol_id = i['symbolId']
+                break
+
+        if symbol_id is None:
+            self.logs.error("Ticker not found for %s: %s" %
+                            (ticker, symbols))
             return None
 
-        quote = quotes["quotes"]["quote"]
-        self.logs.debug("Quote for %s: %s" % (ticker, quote))
-        if "last" not in quote:
+        return symbol_id
+
+    def get_last_price(self, ticker):
+        """Finds the last trade price for the specified stock."""
+
+        symbol_id = self.get_ticker_symbol_id(ticker)
+        if symbol_id is None:
+            self.logs.error("Ticker not found for %s: stack" % ticker)
+            return None
+
+        quotes_url = self.api_server % "v1/markets/quotes/%s" % symbol_id
+
+        response = self.make_request(url=quotes_url)
+
+        if not response or "quotes" not in response:
+            self.logs.error("Missing quotes response for %s: %s" %
+                            (ticker, response))
+            return None
+
+        quote = response["quotes"][0]
+        if "lastTradePrice" not in quote:
             self.logs.error("Malformed quote for %s: %s" % (ticker, quote))
             return None
 
-        try:
-            last = float(quote["last"])
-        except ValueError:
-            self.logs.error("Malformed last for %s: %s" %
-                            (ticker, quote["last"]))
+        # Halt, Volume, and Market Cap Safeguards
+        if quote["isHalted"]:
+            self.logs.error("Trading halt active for %s: %s" %
+                            (ticker, response))
             return None
 
-        if last > 0:
+        details_url = self.api_server % "v1/symbols/%s" % symbol_id
+
+        details_response = self.make_request(url=details_url)
+
+        if not details_response or "symbols" not in details_response:
+            self.logs.error("Missing detailed quotes response for %s: %s" %
+                            (ticker, details_response))
+            return None
+
+        details = details_response['symbols'][0]
+        if ("marketCap" not in details_response) or ("averageVol3Months" not in details_response):
+            self.logs.error("Malformed detailed quotes response for %s: %s" %
+                            (ticker, details_response))
+            return None
+
+        if details['marketCap'] < 1000000000:
+            self.logs.error("Market cap too low (under 1B) for %s: %s" %
+                            (ticker, details_response))
+            return None
+
+        if details['averageVol3Months'] < 250000:
+            self.logs.error("Volume too low (under 250k) for %s: %s" %
+                            (ticker, details_response))
+            return None
+
+        self.logs.debug("Quote for %s: %s" % (ticker, quote))
+
+        try:
+            last = float(quote["lastTradePrice"])
+        except ValueError:
+            self.logs.error("Malformed last for %s: %s" %
+                            (ticker, quote["lastTradePrice"]))
+            return None
+
+        if last > 1:    # Prevent us from playing with penny stocks (under $1)
             return last
         else:
             self.logs.error("Zero quote for: %s" % ticker)
             return None
 
     def get_order_url(self):
-        """Gets the TradeKing URL for placing orders."""
+        """Gets the Questrade URL for placing orders."""
 
-        url_path = "accounts/%s/orders" % TRADEKING_ACCOUNT_NUMBER
+        url_path = "v1/accounts/%s/orders" % QUESTRADE_ACCOUNT_NUMBER
         if not USE_REAL_MONEY:
-            url_path += "/preview"
-        return TRADEKING_API_URL % url_path
+            url_path += "/impact"
+        return self.api_server % url_path
 
     def get_quantity(self, ticker, budget):
         """Calculates the quantity of a stock based on the current market price
@@ -558,8 +583,7 @@ class Trading:
 
     def bull(self, ticker, budget):
         """Executes the bullish strategy on the specified stock within the
-        specified budget: Buy now at market rate and sell at market rate at
-        close.
+        specified budget: Buy now at market rate.
         """
 
         # Calculate the quantity.
@@ -569,63 +593,110 @@ class Trading:
             return False
 
         # Buy the stock now.
-        buy_fixml = self.fixml_buy_now(ticker, quantity)
-        if not self.make_order_request(buy_fixml):
-            return False
-
-        # Sell the stock at close.
-        sell_fixml = self.fixml_sell_eod(ticker, quantity)
-        if not self.make_order_request(sell_fixml):
+        if not self.make_order_request(ticker, quantity):
             return False
 
         return True
 
     def bear(self, ticker, budget):
         """Executes the bearish strategy on the specified stock within the
-        specified budget: Sell short at market rate and buy to cover at market
-        rate at close.
+        specified budget: Sell short at market rate.
         """
 
         # Calculate the quantity.
-        quantity = self.get_quantity(ticker, budget)
+        quantity = -1 * self.get_quantity(ticker, budget)
         if not quantity:
             self.logs.warn("Not trading without quantity.")
             return False
 
         # Short the stock now.
-        short_fixml = self.fixml_short_now(ticker, quantity)
-        if not self.make_order_request(short_fixml):
-            return False
-
-        # Cover the short at close.
-        cover_fixml = self.fixml_cover_eod(ticker, quantity)
-        if not self.make_order_request(cover_fixml):
+        if not self.make_order_request(ticker, quantity):
             return False
 
         return True
 
-    def make_order_request(self, fixml):
-        """Executes an order defined by FIXML and verifies the response."""
+    def make_order_request(self, ticker, quantity):
+        """Executes an order defined by ticker and quantity and verifies the response."""
 
-        response = self.make_request(url=self.get_order_url(), method="POST",
-                                     body=fixml, headers=FIXML_HEADERS)
+        if quantity > 0 :
+            action = "Buy"
+        elif quantity < 0:
+            action = "Sell"
+            quantity *= -1
+        else:
+            self.logs.error("Cannot place order for 0 shares: %s %s" % (ticker, quantity))
+            return False
+
+        # Create the order
+        data = dict()
+        data['symbolId'] = self.get_ticker_symbol_id(ticker)
+        data['quantity'] = quantity
+        data['IcebergQuantity'] = 1
+        data['orderType'] = "Market"
+        data['action'] = action
+        data['timeInForce'] = "Day"
+        data['primaryRoute'] = "AUTO"
+        data['secondaryRoute'] = "AUTO"
+        body = json.dumps(data)
+
+        response = self.make_request(url=self.get_order_url(), method="POST", body=body)
 
         # Check if there is a response.
-        if not response or "response" not in response:
-            self.logs.error("Order request failed: %s %s" % (fixml, response))
+        if not response or "orderId" not in response:
+            self.logs.error("Order request failed: %s %s" % (body, response))
             return False
 
         # Check if the response is in the expected format.
-        order_response = response["response"]
-        if not order_response or "error" not in order_response:
+        order_response = response["orders"]
+        if not order_response or "id" not in order_response:
             self.logs.error("Malformed order response: %s" % order_response)
             return False
 
-        # The error field indicates whether the order succeeded.
-        error = order_response["error"]
-        if error != "Success":
-            self.logs.error("Error in order response: %s %s" %
-                            (error, order_response))
-            return False
+        self.logs.debug("Order for %s: %s" % (ticker, response))
 
         return True
+
+    def get_current_positions(self):
+        """Gets all current positions on the account"""
+
+        positions_url = self.api_server % ("v1/accounts/%s/positions" % QUESTRADE_ACCOUNT_NUMBER)
+        response = self.make_request(url=positions_url)
+
+        if not response or "positions" not in response:
+            self.logs.error("Missing positions response: %s" % response)
+            return []
+
+        positions = response["positions"]
+        current_positions = []
+        for i in positions:
+            current_positions.append({"symbol": i["symbol"], "symbolId": i["symbolId"], "openQuantity": i["openQuantity"]})
+
+        return current_positions
+
+    def close_out_all_positions(self):
+        """Closes out all active positions on the account 15 minutes before market close"""
+
+        clock_url = self.api_server % "v1/time"
+        response = self.make_request(url=clock_url)
+
+        if not response or "time" not in response:
+            self.logs.error("Missing clock response: %s" % response)
+            return None
+
+        clock_response = response["time"]
+        timestamp = parser.parse(clock_response)
+
+        if not self.is_trading_day(timestamp):
+            return None
+
+        sell_time = timestamp.replace(hour=15, minute=45)
+        close_time = timestamp.replace(hour=16)
+
+        # Short circuit if the market doesn't close within 15 minutes
+        if timestamp < sell_time or timestamp > close_time:
+            return None
+
+        current_positions = self.get_current_positions()
+
+        for i in current_positions:
+            self.make_order_request(i["symbol"], (-1 * i["openQuantity"]))

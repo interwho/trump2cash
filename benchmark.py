@@ -22,8 +22,10 @@ TWEET_IDS = ["806134244384899072", "812061677160202240", "816260343391514624",
 # The initial amount in dollars for the fund simulation.
 FUND_DOLLARS = 100000
 
-# The fee in dollars per trade (https://www.tradeking.com/rates).
-TRADE_FEE = 4.95
+# The fee in dollars per trade (http://www.questrade.com/pricing/self-directed-investing/commissions/stocks).
+TRADE_FEE_MIN = 4.95
+TRADE_FEE_MAX = 9.95
+TRADE_FEE_PER_SHARE = 0.01
 
 
 def format_ratio(ratio):
@@ -82,11 +84,12 @@ def get_market_status(timestamp):
         return "closed"
 
     # Calculate the market hours for the given day. These are the same for NYSE
-    # and NASDAQ and include TradeKing's extended hours.
-    pre_time = timestamp.replace(hour=8)
+    # and NASDAQ and include Questrade's extended hours. (http://help.questrade.com/how-to/frequently-asked-questions-
+    # (faqs)/self-directed-trading/learning-trading-basics/when-are-the-stock-markets-open-and-what-are-pre--and-post-market-hours-)
+    pre_time = timestamp.replace(hour=7, minute=30)
     open_time = timestamp.replace(hour=9, minute=30)
     close_time = timestamp.replace(hour=16)
-    after_time = timestamp.replace(hour=17)
+    after_time = timestamp.replace(hour=17, minute=30)
 
     # Return the market status for each bucket.
     if timestamp >= pre_time and timestamp < open_time:
@@ -244,9 +247,8 @@ if __name__ == "__main__":
     print "### Fund simulation"
     print
     print (u"This is how an initial investment of %s would have grown, includi"
-           u"ng fees of 2 \u00d7 %s per pair of orders. Bold means that the da"
-           u"ta was used to trade.") % (
-               format_dollar(FUND_DOLLARS), format_dollar(TRADE_FEE))
+           u"ng fees of 2 \u00d7 trades per pair of orders. Bold means that the da"
+           u"ta was used to trade.") % (format_dollar(FUND_DOLLARS))
     print
     print "Time | Trade | Gain | Value | Return | Annualized"
     print "-----|-------|------|-------|--------|-----------"
@@ -275,8 +277,15 @@ if __name__ == "__main__":
                 # Use the price at tweet to determine stock quantity.
                 quantity = int(budget // price_at)
 
-                # Pay the fees for both trades.
-                value -= 2 * TRADE_FEE
+                # Pay the fees for both trades, accounting for Questrade's fee logic
+                if quantity < (TRADE_FEE_MIN / TRADE_FEE_PER_SHARE):
+                    current_fee = TRADE_FEE_MIN
+                elif quantity > (TRADE_FEE_MAX / TRADE_FEE_PER_SHARE):
+                    current_fee = TRADE_FEE_MAX
+                else:
+                    current_fee = quantity * TRADE_FEE_PER_SHARE
+
+                value -= 2 * current_fee
 
                 # Calculate the returns depending on the strategy.
                 if strategy["action"] == "bull":
